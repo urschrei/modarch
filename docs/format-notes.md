@@ -72,9 +72,15 @@ against our images:
   ZR38500, a stock "Six-Channel Dolby Digital Surround Processor" used
   in DVD players — softening the layer-2 problem for the 5.1 side.
 - The wiki links example DMU files (`tonefile.sva`/`.srd`, 1 kHz tone,
-  18,750 frames) but the repo paths 404 — worth an issue/contact to the
-  project. The CA10's AC-2 card is a generic "Cat. No. 621" DSP card;
-  DSP architecture not yet identified (the `.ehx` binary will tell).
+  18,750 frames) but the repo paths 404. Searched without luck
+  (2026-08-21): full git history of repo + wiki (never committed), no
+  releases, GitHub code search, forks, archive.org/Wayback. The files
+  exist with the project authors — awaiting contact with David
+  Ferguson. Note the tonefile was made on a DMU in **2020**, so someone
+  in that circle has working DMU hardware today. Samples elsewhere in
+  the repo are credited to Denis-Carl Robidoux — a second contact.
+  The CA10's AC-2 card is a generic "Cat. No. 621" DSP card; DSP
+  architecture not yet identified (the `.ehx` binary will tell).
 
 Consequences for this project:
 
