@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <errno.h>
 #include "sha256.h"
 
 #define CHUNK_BLOCKS   64      /* blocks per READ(10) in the fast path   */
@@ -122,10 +123,10 @@ int main(int argc, char **argv)
 {
     HANDLE h;
     FILE *img;
-    char path[512];
+    char path[512], img_path[512];
     char vendor[9], product[17], rev[5];
     uint32_t last_lba, block_size, nblocks, lba;
-    uint64_t bad = 0;
+    uint64_t bad = 0, written = 0;
     UCHAR *buf;
     sha256_ctx sha;
     uint8_t digest[32];
@@ -167,9 +168,12 @@ int main(int argc, char **argv)
     buf = (UCHAR *)malloc((size_t)CHUNK_BLOCKS * block_size);
     if (!buf) { logf_("out of memory\n"); return 1; }
 
-    _snprintf(path, sizeof path - 1, "%s.img", argv[2]);
-    img = fopen(path, "wb");
-    if (!img) { logf_("cannot create %s\n", path); return 1; }
+    _snprintf(img_path, sizeof img_path - 1, "%s.img", argv[2]);
+    img = fopen(img_path, "wb");
+    if (!img) {
+        logf_("cannot create %s (%s)\n", img_path, strerror(errno));
+        return 1;
+    }
 
     sha256_init(&sha);
 
@@ -196,7 +200,16 @@ int main(int argc, char **argv)
                 }
             }
         }
-        fwrite(buf, block_size, n, img);
+        /* The hash covers the bytes read from the disc. A write error
+         * therefore cannot be detected from the hash: check it here. */
+        if (fwrite(buf, block_size, n, img) != n) {
+            logf_("\nWRITE ERROR on %s after %llu bytes (%s) — "
+                  "image is incomplete, no hash written\n",
+                  img_path, (unsigned long long)written, strerror(errno));
+            fclose(img);
+            return 1;
+        }
+        written += (uint64_t)n * block_size;
         sha256_update(&sha, buf, (size_t)n * block_size);
         if ((lba / CHUNK_BLOCKS) % 64 == 0)
             fprintf(stderr, "\r%lu / %lu blocks",
@@ -204,16 +217,25 @@ int main(int argc, char **argv)
     }
     fprintf(stderr, "\r%lu / %lu blocks\n",
             (unsigned long)nblocks, (unsigned long)nblocks);
-    fclose(img);
+    if (fclose(img) != 0) {
+        logf_("WRITE ERROR closing %s (%s) — image may be incomplete, "
+              "no hash written\n", img_path, strerror(errno));
+        return 1;
+    }
+    logf_("image: %s, %llu bytes written\n",
+          img_path, (unsigned long long)written);
 
     sha256_final(&sha, digest);
     _snprintf(path, sizeof path - 1, "%s.sha256", argv[2]);
     {
         FILE *f = fopen(path, "w");
-        if (f) {
+        if (!f) {
+            logf_("warning: cannot create %s (%s)\n", path, strerror(errno));
+        } else {
             for (i = 0; i < 32; i++) fprintf(f, "%02x", digest[i]);
             fprintf(f, "  %s.img\n", argv[2]);
-            fclose(f);
+            if (fclose(f) != 0)
+                logf_("warning: error writing %s (%s)\n", path, strerror(errno));
         }
     }
     logf_("done: %llu unreadable sector(s)\n", (unsigned long long)bad);
