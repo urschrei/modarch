@@ -20,7 +20,8 @@
 #include <errno.h>
 #include "sha256.h"
 
-#define CHUNK_BLOCKS   64      /* blocks per READ(10) in the fast path   */
+#define CHUNK_BYTES    65536   /* bytes per READ(10) in the fast path,
+                                  reduced if the adapter allows less   */
 #define SPTI_TIMEOUT   30      /* seconds per SCSI command               */
 #define MAX_RETRIES    4       /* per-sector retries in the slow path    */
 #define SENSE_LEN      32
@@ -155,6 +156,31 @@ static int read_capacity(HANDLE h, uint32_t *last_lba, uint32_t *block_size,
     return 0;
 }
 
+static const char *bus_type_str(UCHAR t)
+{
+    static const char *names[] = {
+        "unknown", "SCSI", "ATAPI", "ATA", "IEEE1394", "SSA", "Fibre",
+        "USB", "RAID", "iSCSI", "SAS", "SATA", "SD", "MMC"
+    };
+    return t < sizeof names / sizeof names[0] ? names[t] : "other";
+}
+
+/* Ask the port driver for the adapter's transfer limits. Returns 0 and
+ * fills *d on success; the caller then keeps each READ within them. */
+static int query_adapter(HANDLE h, STORAGE_ADAPTER_DESCRIPTOR *d)
+{
+    STORAGE_PROPERTY_QUERY q;
+    DWORD ret;
+    memset(&q, 0, sizeof q);
+    q.PropertyId = StorageAdapterProperty;
+    q.QueryType  = PropertyStandardQuery;
+    memset(d, 0, sizeof *d);
+    if (!DeviceIoControl(h, IOCTL_STORAGE_QUERY_PROPERTY, &q, sizeof q,
+                         d, sizeof *d, &ret, NULL))
+        return -1;
+    return 0;
+}
+
 static int read10(HANDLE h, uint32_t lba, uint16_t nblocks,
                   void *buf, uint32_t block_size, scsi_err *e)
 {
@@ -176,7 +202,7 @@ int main(int argc, char **argv)
     FILE *img;
     char path[512], img_path[512];
     char vendor[9], product[17], rev[5];
-    uint32_t last_lba, block_size, nblocks, lba;
+    uint32_t last_lba, block_size, nblocks, lba, chunk, chunk_bytes;
     uint64_t bad = 0, written = 0, chunk_fail = 0, recovered = 0;
     UCHAR *buf;
     sha256_ctx sha;
@@ -223,7 +249,40 @@ int main(int argc, char **argv)
           (unsigned long)nblocks, (unsigned long)block_size,
           (unsigned long long)nblocks * block_size);
 
-    buf = (UCHAR *)malloc((size_t)CHUNK_BLOCKS * block_size);
+    chunk_bytes = CHUNK_BYTES;
+    {
+        STORAGE_ADAPTER_DESCRIPTOR ad;
+        if (query_adapter(h, &ad) == 0) {
+            logf_("adapter: bus %s, max transfer %lu bytes, max pages %lu, "
+                  "alignment mask 0x%lx, %s\n",
+                  bus_type_str(ad.BusType),
+                  (unsigned long)ad.MaximumTransferLength,
+                  (unsigned long)ad.MaximumPhysicalPages,
+                  (unsigned long)ad.AlignmentMask,
+                  ad.AdapterUsesPio ? "PIO" : "DMA");
+            if (ad.MaximumTransferLength && ad.MaximumTransferLength < chunk_bytes)
+                chunk_bytes = ad.MaximumTransferLength;
+            /* The buffer is page-aligned, so it spans exactly
+             * chunk_bytes / 4096 pages. */
+            if (ad.MaximumPhysicalPages &&
+                ad.MaximumPhysicalPages < chunk_bytes / 4096)
+                chunk_bytes = ad.MaximumPhysicalPages * 4096;
+        } else {
+            logf_("adapter: IOCTL_STORAGE_QUERY_PROPERTY failed (win32=%lu), "
+                  "assuming %lu-byte transfers\n",
+                  (unsigned long)GetLastError(), (unsigned long)chunk_bytes);
+        }
+    }
+    chunk = chunk_bytes / block_size;
+    if (chunk < 1) chunk = 1;
+    if (chunk > 0xffff) chunk = 0xffff;
+    logf_("chunk: %lu blocks (%lu bytes) per READ(10)\n",
+          (unsigned long)chunk, (unsigned long)(chunk * block_size));
+
+    /* VirtualAlloc gives a page-aligned buffer, which satisfies any
+     * adapter alignment mask. */
+    buf = (UCHAR *)VirtualAlloc(NULL, (size_t)chunk * block_size,
+                                MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (!buf) { logf_("out of memory\n"); return 1; }
 
     _snprintf(img_path, sizeof img_path - 1, "%s.img", argv[2]);
@@ -235,9 +294,8 @@ int main(int argc, char **argv)
 
     sha256_init(&sha);
 
-    for (lba = 0; lba < nblocks; lba += CHUNK_BLOCKS) {
-        uint16_t n = (uint16_t)((nblocks - lba < CHUNK_BLOCKS)
-                                ? nblocks - lba : CHUNK_BLOCKS);
+    for (lba = 0; lba < nblocks; lba += chunk) {
+        uint16_t n = (uint16_t)((nblocks - lba < chunk) ? nblocks - lba : chunk);
         scsi_err e;
         char es[96];
 
@@ -282,7 +340,7 @@ int main(int argc, char **argv)
         }
         written += (uint64_t)n * block_size;
         sha256_update(&sha, buf, (size_t)n * block_size);
-        if ((lba / CHUNK_BLOCKS) % 64 == 0) {
+        if ((lba / chunk) % 64 == 0) {
             fprintf(stderr, "\r%lu / %lu blocks",
                     (unsigned long)lba, (unsigned long)nblocks);
             g_progress = 1;
@@ -323,6 +381,6 @@ int main(int argc, char **argv)
 
     if (g_log) fclose(g_log);
     CloseHandle(h);
-    free(buf);
+    VirtualFree(buf, 0, MEM_RELEASE);
     return bad ? 3 : 0;
 }
