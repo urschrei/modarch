@@ -46,13 +46,31 @@ static void logf_(const char *fmt, ...)
     }
 }
 
-/* Issue one SCSI command with data-in transfer. Returns 0 on success;
- * on failure returns -1 and, if sense data is present, copies it out. */
+/* Outcome of one SCSI command. Exactly one of the failure fields is
+ * meaningful; err_str() picks it. */
+typedef struct {
+    DWORD win32;        /* GetLastError() if the kernel rejected the request */
+    UCHAR status;       /* SCSI status byte                                    */
+    ULONG requested;    /* bytes asked for                                     */
+    ULONG transferred;  /* bytes the adapter reports it moved                  */
+    UCHAR sense[SENSE_LEN];
+} scsi_err;
+
+/* Issue one SCSI command with data-in transfer. Returns 0 on success.
+ * Returns -1 if the kernel rejected the request, the device returned a
+ * non-GOOD status, or fewer bytes than requested were transferred. On
+ * any outcome *e (if given) describes what happened. */
 static int scsi_cmd(HANDLE h, const UCHAR *cdb, UCHAR cdblen,
-                    void *buf, ULONG buflen, UCHAR sense_out[SENSE_LEN])
+                    void *buf, ULONG buflen, scsi_err *e)
 {
     SPTD_WITH_SENSE s;
+    scsi_err local;
     DWORD ret;
+
+    if (!e) e = &local;
+    memset(e, 0, sizeof *e);
+    e->requested = buflen;
+
     memset(&s, 0, sizeof s);
     s.sptd.Length             = sizeof(SCSI_PASS_THROUGH_DIRECT);
     s.sptd.CdbLength          = cdblen;
@@ -65,39 +83,78 @@ static int scsi_cmd(HANDLE h, const UCHAR *cdb, UCHAR cdblen,
     memcpy(s.sptd.Cdb, cdb, cdblen);
 
     if (!DeviceIoControl(h, IOCTL_SCSI_PASS_THROUGH_DIRECT,
-                         &s, sizeof s, &s, sizeof s, &ret, NULL))
-        return -1;
-    if (s.sptd.ScsiStatus != 0) {
-        if (sense_out) memcpy(sense_out, s.sense, SENSE_LEN);
+                         &s, sizeof s, &s, sizeof s, &ret, NULL)) {
+        e->win32 = GetLastError();
         return -1;
     }
+    e->status      = s.sptd.ScsiStatus;
+    e->transferred = s.sptd.DataTransferLength;
+    memcpy(e->sense, s.sense, SENSE_LEN);
+    if (e->status != 0) return -1;
+    /* A short transfer with GOOD status would leave stale bytes in the
+     * buffer. Treat it as a failure so the caller retries. */
+    if (e->transferred != buflen) return -1;
     return 0;
 }
 
-static int inquiry(HANDLE h, char vendor[9], char product[17], char rev[5])
+/* Render a scsi_err for the log. Sense is decoded for fixed format
+ * (response code 0x70/0x71) and descriptor format (0x72/0x73). */
+static void err_str(const scsi_err *e, char out[96])
+{
+    const UCHAR *s = e->sense;
+    UCHAR rc = s[0] & 0x7f;
+    if (e->win32) {
+        _snprintf(out, 95, "win32=%lu (request rejected before reaching "
+                  "the device)", (unsigned long)e->win32);
+    } else if (e->status != 0) {
+        if (rc == 0x70 || rc == 0x71)
+            _snprintf(out, 95, "status=%02x key=%02x asc=%02x ascq=%02x%s",
+                      e->status, s[2] & 0x0f, s[12], s[13],
+                      rc == 0x71 ? " (deferred)" : "");
+        else if (rc == 0x72 || rc == 0x73)
+            _snprintf(out, 95, "status=%02x key=%02x asc=%02x ascq=%02x%s",
+                      e->status, s[1] & 0x0f, s[2], s[3],
+                      rc == 0x73 ? " (deferred)" : "");
+        else if (rc == 0)
+            _snprintf(out, 95, "status=%02x (no sense data)", e->status);
+        else
+            _snprintf(out, 95, "status=%02x sense[0]=%02x (unrecognised "
+                      "format)", e->status, s[0]);
+    } else if (e->transferred != e->requested) {
+        _snprintf(out, 95, "short transfer %lu/%lu bytes",
+                  (unsigned long)e->transferred, (unsigned long)e->requested);
+    } else {
+        _snprintf(out, 95, "ok");
+    }
+    out[95] = 0;
+}
+
+static int inquiry(HANDLE h, char vendor[9], char product[17], char rev[5],
+                   scsi_err *e)
 {
     UCHAR cdb[6] = { 0x12, 0, 0, 0, 96, 0 };   /* INQUIRY */
     UCHAR buf[96];
     memset(buf, 0, sizeof buf);
-    if (scsi_cmd(h, cdb, 6, buf, sizeof buf, NULL) != 0) return -1;
+    if (scsi_cmd(h, cdb, 6, buf, sizeof buf, e) != 0) return -1;
     memcpy(vendor,  buf + 8, 8);  vendor[8]   = 0;
     memcpy(product, buf + 16, 16); product[16] = 0;
     memcpy(rev,     buf + 32, 4);  rev[4]      = 0;
     return 0;
 }
 
-static int read_capacity(HANDLE h, uint32_t *last_lba, uint32_t *block_size)
+static int read_capacity(HANDLE h, uint32_t *last_lba, uint32_t *block_size,
+                         scsi_err *e)
 {
     UCHAR cdb[10] = { 0x25, 0,0,0,0,0,0,0,0,0 };   /* READ CAPACITY(10) */
     UCHAR buf[8];
-    if (scsi_cmd(h, cdb, 10, buf, sizeof buf, NULL) != 0) return -1;
+    if (scsi_cmd(h, cdb, 10, buf, sizeof buf, e) != 0) return -1;
     *last_lba   = (uint32_t)buf[0]<<24 | (uint32_t)buf[1]<<16 | (uint32_t)buf[2]<<8 | buf[3];
     *block_size = (uint32_t)buf[4]<<24 | (uint32_t)buf[5]<<16 | (uint32_t)buf[6]<<8 | buf[7];
     return 0;
 }
 
 static int read10(HANDLE h, uint32_t lba, uint16_t nblocks,
-                  void *buf, uint32_t block_size, UCHAR sense_out[SENSE_LEN])
+                  void *buf, uint32_t block_size, scsi_err *e)
 {
     UCHAR cdb[10];
     memset(cdb, 0, sizeof cdb);
@@ -108,15 +165,7 @@ static int read10(HANDLE h, uint32_t lba, uint16_t nblocks,
     cdb[5] = (UCHAR)(lba);
     cdb[7] = (UCHAR)(nblocks >> 8);
     cdb[8] = (UCHAR)(nblocks);
-    return scsi_cmd(h, cdb, 10, buf, nblocks * block_size, sense_out);
-}
-
-static void sense_str(const UCHAR s[SENSE_LEN], char out[64])
-{
-    /* fixed-format sense: key at byte 2, ASC byte 12, ASCQ byte 13 */
-    _snprintf(out, 63, "key=%02x asc=%02x ascq=%02x",
-              s[2] & 0x0f, s[12], s[13]);
-    out[63] = 0;
+    return scsi_cmd(h, cdb, 10, buf, nblocks * block_size, e);
 }
 
 int main(int argc, char **argv)
@@ -151,14 +200,21 @@ int main(int argc, char **argv)
     _snprintf(path, sizeof path - 1, "%s.log", argv[2]);
     g_log = fopen(path, "w");
 
-    if (inquiry(h, vendor, product, rev) == 0)
-        logf_("device: '%s' '%s' rev '%s'\n", vendor, product, rev);
-    else
-        logf_("warning: INQUIRY failed\n");
+    {
+        scsi_err e;
+        char es[96];
+        if (inquiry(h, vendor, product, rev, &e) == 0) {
+            logf_("device: '%s' '%s' rev '%s'\n", vendor, product, rev);
+        } else {
+            err_str(&e, es);
+            logf_("warning: INQUIRY failed (%s)\n", es);
+        }
 
-    if (read_capacity(h, &last_lba, &block_size) != 0) {
-        logf_("READ CAPACITY failed — no medium, or unsupported\n");
-        return 1;
+        if (read_capacity(h, &last_lba, &block_size, &e) != 0) {
+            err_str(&e, es);
+            logf_("READ CAPACITY failed (%s) — no medium, or unsupported\n", es);
+            return 1;
+        }
     }
     nblocks = last_lba + 1;
     logf_("capacity: %lu blocks x %lu bytes = %llu bytes\n",
@@ -180,19 +236,19 @@ int main(int argc, char **argv)
     for (lba = 0; lba < nblocks; lba += CHUNK_BLOCKS) {
         uint16_t n = (uint16_t)((nblocks - lba < CHUNK_BLOCKS)
                                 ? nblocks - lba : CHUNK_BLOCKS);
-        UCHAR sense[SENSE_LEN];
+        scsi_err e;
 
-        if (read10(h, lba, n, buf, block_size, sense) != 0) {
+        if (read10(h, lba, n, buf, block_size, &e) != 0) {
             /* slow path: one sector at a time with retries */
             uint32_t s;
             for (s = 0; s < n; s++) {
                 int ok = 0, r;
                 for (r = 0; r < MAX_RETRIES && !ok; r++)
                     ok = (read10(h, lba + s, 1, buf + (size_t)s * block_size,
-                                 block_size, sense) == 0);
+                                 block_size, &e) == 0);
                 if (!ok) {
-                    char ss[64];
-                    sense_str(sense, ss);
+                    char ss[96];
+                    err_str(&e, ss);
                     logf_("BAD sector lba=%lu (%s) — zero-filled\n",
                           (unsigned long)(lba + s), ss);
                     memset(buf + (size_t)s * block_size, 0, block_size);
