@@ -77,6 +77,8 @@ test suite asserts `prospect` finds it.
   document: everything known or suspected, with provenance.
 - **[docs/vista-runbook.md](docs/vista-runbook.md)** — field procedure
   for imaging sessions on the air-gapped Vista machine.
+- **[docs/ac2-decoder-plan.md](docs/ac2-decoder-plan.md)** — phased
+  plan for the layer-2 AC-2 decoder.
 
 Headlines: the discs are DMU printmasters, and much of the file format
 (though not the MO filesystem) is documented by the
