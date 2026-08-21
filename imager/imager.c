@@ -31,10 +31,12 @@ typedef struct {
 } SPTD_WITH_SENSE;
 
 static FILE *g_log;
+static int g_progress;   /* a "\r..." progress line is on stderr */
 
 static void logf_(const char *fmt, ...)
 {
     va_list ap;
+    if (g_progress) { fputc('\n', stderr); g_progress = 0; }
     va_start(ap, fmt);
     vfprintf(stderr, fmt, ap);
     va_end(ap);
@@ -175,7 +177,7 @@ int main(int argc, char **argv)
     char path[512], img_path[512];
     char vendor[9], product[17], rev[5];
     uint32_t last_lba, block_size, nblocks, lba;
-    uint64_t bad = 0, written = 0;
+    uint64_t bad = 0, written = 0, chunk_fail = 0, recovered = 0;
     UCHAR *buf;
     sha256_ctx sha;
     uint8_t digest[32];
@@ -237,22 +239,35 @@ int main(int argc, char **argv)
         uint16_t n = (uint16_t)((nblocks - lba < CHUNK_BLOCKS)
                                 ? nblocks - lba : CHUNK_BLOCKS);
         scsi_err e;
+        char es[96];
 
         if (read10(h, lba, n, buf, block_size, &e) != 0) {
             /* slow path: one sector at a time with retries */
             uint32_t s;
+            err_str(&e, es);
+            logf_("chunk lba=%lu n=%u failed (%s) — reading sector by sector\n",
+                  (unsigned long)lba, (unsigned)n, es);
+            chunk_fail++;
             for (s = 0; s < n; s++) {
                 int ok = 0, r;
-                for (r = 0; r < MAX_RETRIES && !ok; r++)
+                scsi_err last;
+                memset(&last, 0, sizeof last);
+                for (r = 0; r < MAX_RETRIES && !ok; r++) {
                     ok = (read10(h, lba + s, 1, buf + (size_t)s * block_size,
                                  block_size, &e) == 0);
+                    if (!ok) last = e;
+                }
                 if (!ok) {
-                    char ss[96];
-                    err_str(&e, ss);
-                    logf_("BAD sector lba=%lu (%s) — zero-filled\n",
-                          (unsigned long)(lba + s), ss);
+                    err_str(&last, es);
+                    logf_("BAD sector lba=%lu after %d tries (%s) — zero-filled\n",
+                          (unsigned long)(lba + s), MAX_RETRIES, es);
                     memset(buf + (size_t)s * block_size, 0, block_size);
                     bad++;
+                } else if (r > 1) {
+                    err_str(&last, es);
+                    logf_("RECOVERED sector lba=%lu on try %d (earlier: %s)\n",
+                          (unsigned long)(lba + s), r, es);
+                    recovered++;
                 }
             }
         }
@@ -267,12 +282,15 @@ int main(int argc, char **argv)
         }
         written += (uint64_t)n * block_size;
         sha256_update(&sha, buf, (size_t)n * block_size);
-        if ((lba / CHUNK_BLOCKS) % 64 == 0)
+        if ((lba / CHUNK_BLOCKS) % 64 == 0) {
             fprintf(stderr, "\r%lu / %lu blocks",
                     (unsigned long)lba, (unsigned long)nblocks);
+            g_progress = 1;
+        }
     }
     fprintf(stderr, "\r%lu / %lu blocks\n",
             (unsigned long)nblocks, (unsigned long)nblocks);
+    g_progress = 0;
     if (fclose(img) != 0) {
         logf_("WRITE ERROR closing %s (%s) — image may be incomplete, "
               "no hash written\n", img_path, strerror(errno));
@@ -294,7 +312,10 @@ int main(int argc, char **argv)
                 logf_("warning: error writing %s (%s)\n", path, strerror(errno));
         }
     }
-    logf_("done: %llu unreadable sector(s)\n", (unsigned long long)bad);
+    logf_("done: %llu unreadable sector(s), %llu recovered on retry, "
+          "%llu chunk read(s) fell back to sector-by-sector\n",
+          (unsigned long long)bad, (unsigned long long)recovered,
+          (unsigned long long)chunk_fail);
     logf_("sha256: ");
     for (i = 0; i < 32; i++) logf_("%02x", digest[i]);
     logf_("\n");
