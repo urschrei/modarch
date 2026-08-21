@@ -39,7 +39,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
           working-directory: analysis
           enable-cache: true
-          cache-dependency-glob: analysis/uv.lock
+          cache-dependency-glob: uv.lock
       - run: uv sync --locked --extra dev
         working-directory: analysis
       - run: uv run pytest tests -q
