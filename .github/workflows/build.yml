@@ -34,11 +34,16 @@ jobs:
         python-version: ["3.13", "3.14"]
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: astral-sh/setup-uv@v10
         with:
           python-version: ${{ matrix.python-version }}
-      - run: pip install -e "analysis/[dev]"
-      - run: pytest analysis/tests -q
+          working-directory: analysis
+          enable-cache: true
+          cache-dependency-glob: analysis/uv.lock
+      - run: uv sync --locked --extra dev
+        working-directory: analysis
+      - run: uv run pytest tests -q
+        working-directory: analysis
 
   release:
     needs: [imager, analysis]          # both jobs green, incl. all matrix legs
