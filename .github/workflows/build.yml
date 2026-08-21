@@ -39,3 +39,24 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: pip install -e "analysis/[dev]"
       - run: pytest analysis/tests -q
+
+  release:
+    needs: [imager, analysis]          # both jobs green, incl. all matrix legs
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write                  # needed to create the release
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: imager-vista-i686
+      - name: Rename and checksum
+        run: |
+          mv imager.exe imager-vista-i686.exe
+          sha256sum imager-vista-i686.exe > imager-vista-i686.exe.sha256
+      - uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            imager-vista-i686.exe
+            imager-vista-i686.exe.sha256
+          generate_release_notes: true
