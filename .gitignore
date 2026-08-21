@@ -1,0 +1,10 @@
+*.exe
+*.img
+*.wav
+*.sha256
+out/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+.venv/
+uv.lock
