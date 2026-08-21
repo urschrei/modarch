@@ -1,6 +1,6 @@
 [project]
 name = "modarch"
-version = "0.1.0"
+version = "0.3.0"
 description = "Format archaeology toolkit for Dolby MO print master disc images"
 license = "BlueOak-1.0.0"
 requires-python = ">=3.10"
