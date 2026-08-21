@@ -1,4 +1,4 @@
-# modarch — Dolby MO print master archaeology
+# modarch: Dolby MO print master archaeology
 
 Tooling for imaging and analyzing 1990s Dolby print masters written to
 magneto-optical (MO) discs, with the goal of documenting the proprietary
@@ -18,7 +18,7 @@ images, so drive time on real discs is spent exactly once per disc.
 
 1. **Write-protect the cartridge** (slide the tab) before it goes anywhere
    near a drive.
-2. **Image first, experiment never** — no tool other than the imager touches
+2. **Image first, experiment never**: no tool other than the imager touches
    an original disc.
 3. **Image every disc twice** and compare SHA-256 before trusting the image.
 4. Debut new imager builds on a sacrificial/ordinary MO disc, not a print
@@ -37,8 +37,8 @@ imager.exe \\.\PhysicalDrive2 out\disc01
 produces `disc01.img` (raw sectors), `disc01.log` (INQUIRY identity,
 capacity, per-sector read failures), `disc01.sha256`.
 
-It queries the drive for the true sector size via READ CAPACITY — MO media
-is commonly 1024 bytes/sector, not 512 — and reads with per-sector retry,
+It queries the drive for the true sector size via READ CAPACITY: MO media
+is commonly 1024 bytes/sector, not 512, then reads with per-sector retry,
 zero-filling and logging anything unrecoverable.
 
 Build locally (Linux/macOS with mingw installed) with `make -C imager`, or
@@ -64,7 +64,7 @@ ordinals, reel/block numbers) and reassembles the raw elementary
 streams from the audio frames. `prospect` brute-forces the small space
 of PCM packings (bit depth × endianness × channel interleave × byte
 offset), scores each window by audio-likeness (lag-1 autocorrelation,
-entropy, clipping), and writes the top candidates as WAVs — retained as
+entropy, clipping), and writes the top candidates as WAVs, which are retained as
 a negative control and for any uncompressed data.
 
 `synth` exists so the toolkit can be validated blind: it plants stereo
@@ -73,18 +73,18 @@ test suite asserts `prospect` finds it.
 
 ## What we know (see docs/)
 
-- **[docs/format-notes.md](docs/format-notes.md)** — the living format
+- **[docs/format-notes.md](docs/format-notes.md)**: the living format
   document: everything known or suspected, with provenance.
-- **[docs/vista-runbook.md](docs/vista-runbook.md)** — field procedure
+- **[docs/vista-runbook.md](docs/vista-runbook.md)**: field procedure
   for imaging sessions on the air-gapped Vista machine.
-- **[docs/ac2-decoder-plan.md](docs/ac2-decoder-plan.md)** — phased
+- **[docs/ac2-decoder-plan.md](docs/ac2-decoder-plan.md)**: phased
   plan for the layer-2 AC-2 decoder.
 
 Headlines: the discs are DMU printmasters, and much of the file format
 (though not the MO filesystem) is documented by the
-[dolby-srd](https://github.com/davidferguson/dolby-srd) project —
+[dolby-srd](https://github.com/davidferguson/dolby-srd) project:
 per-reel `.SRD` (5.1, AC-3-family) and `.SVA` (Lt/Rt, SR-encoded then
-**AC-2 compressed — not raw PCM**) files built from 512-byte frames,
+**AC-2 compressed; not raw PCM**) files built from 512-byte frames,
 plus plaintext logs and, notably, the CA10 decoder DSP firmware on the
 disc itself. Extraction is therefore layered: MO filesystem (this
 project's contribution) → AC-2 decode (no open decoder exists yet; see
