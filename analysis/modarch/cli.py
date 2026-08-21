@@ -25,6 +25,9 @@ def main(argv: list[str] | None = None) -> int:
     sy.add_argument("output")
     sy.add_argument("--seconds", type=float, default=4.0)
 
+    sd = sub.add_parser("srd", help="scan for Dolby printmaster (.SRD/.SVA) frame runs")
+    sd.add_argument("image")
+
     args = p.parse_args(argv)
 
     if args.cmd == "synth":
@@ -46,6 +49,17 @@ def main(argv: list[str] | None = None) -> int:
         from modarch.entropy import entropy_map, summarize
 
         print(summarize(entropy_map(data, block=args.block)))
+        return 0
+
+    if args.cmd == "srd":
+        from modarch.srd import find_frame_runs
+
+        runs = find_frame_runs(data)
+        if not runs:
+            print("no printmaster frame runs found")
+            return 1
+        for r in runs:
+            print(r.describe())
         return 0
 
     if args.cmd == "prospect":
