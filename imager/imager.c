@@ -135,17 +135,72 @@ static void err_str(const scsi_err *e, char out[96])
     out[95] = 0;
 }
 
-static int inquiry(HANDLE h, char vendor[9], char product[17], char rev[5],
-                   scsi_err *e)
+/* Write a hex dump of n bytes to the log, 16 per line. */
+static void log_hex(const char *label, const UCHAR *p, size_t n)
 {
-    UCHAR cdb[6] = { 0x12, 0, 0, 0, 96, 0 };   /* INQUIRY */
-    UCHAR buf[96];
-    memset(buf, 0, sizeof buf);
-    if (scsi_cmd(h, cdb, 6, buf, sizeof buf, e) != 0) return -1;
-    memcpy(vendor,  buf + 8, 8);  vendor[8]   = 0;
-    memcpy(product, buf + 16, 16); product[16] = 0;
-    memcpy(rev,     buf + 32, 4);  rev[4]      = 0;
-    return 0;
+    size_t i, j;
+    logf_("%s (%lu bytes):\n", label, (unsigned long)n);
+    for (i = 0; i < n; i += 16) {
+        logf_("  %04lx:", (unsigned long)i);
+        for (j = i; j < i + 16 && j < n; j++) logf_(" %02x", p[j]);
+        logf_("\n");
+    }
+}
+
+static const char *dev_type_str(UCHAR t)
+{
+    switch (t) {
+    case 0x00: return "direct-access";
+    case 0x01: return "sequential-access";
+    case 0x04: return "write-once";
+    case 0x05: return "CD/DVD";
+    case 0x07: return "optical memory";
+    case 0x0e: return "simplified direct-access";
+    case 0x1f: return "no device";
+    default:   return "other";
+    }
+}
+
+#define INQ_LEN 96
+
+/* Standard INQUIRY. Returns the number of valid bytes in buf (at least
+ * 36, at most INQ_LEN), or -1. */
+static int inquiry(HANDLE h, UCHAR buf[INQ_LEN], scsi_err *e)
+{
+    UCHAR cdb[6] = { 0x12, 0, 0, 0, INQ_LEN, 0 };   /* INQUIRY */
+    int len;
+    memset(buf, 0, INQ_LEN);
+    if (scsi_cmd(h, cdb, 6, buf, INQ_LEN, e) != 0) return -1;
+    len = 5 + buf[4];                /* byte 4: additional length */
+    if (len < 36) len = 36;
+    if (len > INQ_LEN) len = INQ_LEN;
+    return len;
+}
+
+#define MS_LEN 512
+
+/* MODE SENSE for all pages (0x3F). Tries the 6-byte form first, then
+ * the 10-byte form. Returns the number of valid bytes in buf, or -1.
+ * *ten tells the caller which header layout buf has. */
+static int mode_sense(HANDLE h, UCHAR buf[MS_LEN], int *ten, scsi_err *e)
+{
+    UCHAR cdb6[6]   = { 0x1a, 0, 0x3f, 0, 255, 0 };
+    UCHAR cdb10[10] = { 0x5a, 0, 0x3f, 0, 0, 0, 0,
+                        (UCHAR)(MS_LEN >> 8), (UCHAR)MS_LEN, 0 };
+    int len;
+    memset(buf, 0, MS_LEN);
+    if (scsi_cmd(h, cdb6, 6, buf, 255, e) == 0) {
+        *ten = 0;
+        len  = buf[0] + 1;
+        return len > 255 ? 255 : len;
+    }
+    memset(buf, 0, MS_LEN);
+    if (scsi_cmd(h, cdb10, 10, buf, MS_LEN, e) == 0) {
+        *ten = 1;
+        len  = (buf[0] << 8 | buf[1]) + 2;
+        return len > MS_LEN ? MS_LEN : len;
+    }
+    return -1;
 }
 
 static int test_unit_ready(HANDLE h, scsi_err *e)
@@ -175,11 +230,10 @@ static int wait_ready(HANDLE h)
 }
 
 static int read_capacity(HANDLE h, uint32_t *last_lba, uint32_t *block_size,
-                         scsi_err *e)
+                         UCHAR buf[8], scsi_err *e)
 {
     UCHAR cdb[10] = { 0x25, 0,0,0,0,0,0,0,0,0 };   /* READ CAPACITY(10) */
-    UCHAR buf[8];
-    if (scsi_cmd(h, cdb, 10, buf, sizeof buf, e) != 0) return -1;
+    if (scsi_cmd(h, cdb, 10, buf, 8, e) != 0) return -1;
     *last_lba   = (uint32_t)buf[0]<<24 | (uint32_t)buf[1]<<16 | (uint32_t)buf[2]<<8 | buf[3];
     *block_size = (uint32_t)buf[4]<<24 | (uint32_t)buf[5]<<16 | (uint32_t)buf[6]<<8 | buf[7];
     return 0;
@@ -231,6 +285,8 @@ int main(int argc, char **argv)
     FILE *img;
     char path[512], img_path[512];
     char vendor[9], product[17], rev[5];
+    UCHAR inq[INQ_LEN], cap[8], ms[MS_LEN];
+    int inq_len, ms_len, ms_ten = 0;
     uint32_t last_lba, block_size, nblocks, lba, chunk, chunk_bytes;
     uint64_t bad = 0, written = 0, chunk_fail = 0, recovered = 0;
     UCHAR *buf;
@@ -260,8 +316,18 @@ int main(int argc, char **argv)
     {
         scsi_err e;
         char es[96];
-        if (inquiry(h, vendor, product, rev, &e) == 0) {
+        inq_len = inquiry(h, inq, &e);
+        if (inq_len > 0) {
+            memcpy(vendor,  inq + 8,  8);  vendor[8]   = 0;
+            memcpy(product, inq + 16, 16); product[16] = 0;
+            memcpy(rev,     inq + 32, 4);  rev[4]      = 0;
             logf_("device: '%s' '%s' rev '%s'\n", vendor, product, rev);
+            logf_("inquiry: type 0x%02x (%s), qualifier %u, %s, "
+                  "version 0x%02x, response format %u\n",
+                  inq[0] & 0x1f, dev_type_str(inq[0] & 0x1f), inq[0] >> 5,
+                  (inq[1] & 0x80) ? "removable" : "non-removable",
+                  inq[2], inq[3] & 0x0f);
+            log_hex("inquiry data", inq, (size_t)inq_len);
         } else {
             err_str(&e, es);
             logf_("warning: INQUIRY failed (%s)\n", es);
@@ -272,7 +338,7 @@ int main(int argc, char **argv)
                   READY_WAIT);
 
         for (i = 1; ; i++) {
-            if (read_capacity(h, &last_lba, &block_size, &e) == 0) break;
+            if (read_capacity(h, &last_lba, &block_size, cap, &e) == 0) break;
             err_str(&e, es);
             logf_("READ CAPACITY failed (%s), attempt %d/%d\n",
                   es, i, CAPACITY_TRIES);
@@ -281,6 +347,32 @@ int main(int argc, char **argv)
                 return 1;
             }
             Sleep(1000);
+        }
+        log_hex("read capacity data", cap, 8);
+
+        /* The mode parameter header carries the write-protect bit: a
+         * cheap check that the cartridge tab is set. */
+        ms_len = mode_sense(h, ms, &ms_ten, &e);
+        if (ms_len > 0) {
+            UCHAR medium = ms_ten ? ms[2] : ms[1];
+            UCHAR dsp    = ms_ten ? ms[3] : ms[2];
+            unsigned bdl = ms_ten ? (unsigned)(ms[6] << 8 | ms[7]) : ms[3];
+            const UCHAR *bd = ms + (ms_ten ? 8 : 4);
+            logf_("mode sense(%d): medium type 0x%02x, device-specific "
+                  "0x%02x, write-protect %s\n", ms_ten ? 10 : 6,
+                  medium, dsp, (dsp & 0x80) ? "YES" : "NO");
+            if (bdl >= 8)
+                logf_("  block descriptor: density 0x%02x, blocks %lu, "
+                      "block length %lu\n", bd[0],
+                      (unsigned long)(bd[1] << 16 | bd[2] << 8 | bd[3]),
+                      (unsigned long)(bd[5] << 16 | bd[6] << 8 | bd[7]));
+            if (!(dsp & 0x80))
+                logf_("WARNING: medium is not reported write-protected — "
+                      "check the cartridge tab\n");
+            log_hex("mode sense data", ms, (size_t)ms_len);
+        } else {
+            err_str(&e, es);
+            logf_("mode sense: unavailable (%s)\n", es);
         }
     }
     nblocks = last_lba + 1;
