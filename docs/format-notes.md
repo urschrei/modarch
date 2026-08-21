@@ -53,7 +53,28 @@ against our images:
 - Storage was MO disc originally ("a few gigabytes"); later Compact
   Flash and plain file delivery.
 - Decoder firmware for the CA10 exists for both codecs
-  (`srd_*.ehx` = AC-3, `sva_*.ehx` = AC-2 DSP programs).
+  (`srd_*.ehx` = AC-3, `sva_*.ehx` = AC-2 DSP programs) — and **ships on
+  the MO disc itself**: the printmaster includes `srd_e5.ehx`,
+  `srd_d4.ehx`, `sva_e3.ehx`, `sva_d2.ehx`, `sva_d1.ehx`, plus
+  `dsp-boot.bin`, `dsp.ldc`, `dyn.ldr` and a zero-byte `PROTECT.DMU`.
+  The CA10 auto-updates its coder DSPs from the disc. So **every disc we
+  image should contain the AC-2 decoder firmware** — the primary
+  disassembly target for layer 2.
+- Full 512-byte frame layout is documented (see the docstring in
+  `analysis/modarch/srd.py`): sync `37 2B 38 69`; container type at
+  byte 4 (0x0B SR-D / 0x09 SVA-or-filler); 24-bit BE ordinal at 7–9;
+  validity marker `44 99 FB 0B` at 42; **430-byte audio payload at
+  bytes 46–475**; checksum at 476–477; reel/block packed at 478–480;
+  `DOLBY SR*D` at 484; Dolby logo bitmap to end (`… 64 61 DB 88`).
+  `modarch srd <image> --extract` parses frames and reassembles the
+  raw AC-2/AC-3 elementary stream in ordinal order.
+- EC9/EC11 is believed close to AC-3: the DA20 decodes it on a Zoran
+  ZR38500, a stock "Six-Channel Dolby Digital Surround Processor" used
+  in DVD players — softening the layer-2 problem for the 5.1 side.
+- The wiki links example DMU files (`tonefile.sva`/`.srd`, 1 kHz tone,
+  18,750 frames) but the repo paths 404 — worth an issue/contact to the
+  project. The CA10's AC-2 card is a generic "Cat. No. 621" DSP card;
+  DSP architecture not yet identified (the `.ehx` binary will tell).
 
 Consequences for this project:
 
@@ -85,6 +106,50 @@ Consequences for this project:
   *(unverified — prospector sweeps these)*.
 - Possibility the disc also carries data for the digital (SR•D) track;
   AC-3 frames would betray themselves with 0x0B77 sync words.
+
+## Layer 2: AC-2 decoding feasibility
+
+Assessment 2026-08-21. Writing an AC-2 decoder from public sources is
+feasible; the papers give the architecture, but not the bitstream.
+
+What the literature provides:
+
+- Filterbank: TDAC/MDCT — Princen & Bradley, "Analysis/Synthesis filter
+  bank design based on time domain aliasing cancellation," IEEE Trans.
+  ASSP 34(5), 1986. DOI: 10.1109/TASSP.1986.1164954 (verified).
+- Codec architecture: Davidson, Fielder & Antill, "High-quality audio
+  transform coding at 128 kbits/s," ICASSP 1990.
+  DOI: 10.1109/ICASSP.1990.116136 (verified). Block-floating-point
+  spectrum (exponents + mantissas); **backward-adaptive bit allocation**
+  recomputed by the decoder from the exponent envelope — no allocation
+  side info in the stream, so a decoder must match the algorithm
+  bit-exactly or produce garbage.
+- Block switching: Bosi, Davidson & Fielder, ASPAA 1991.
+  DOI: 10.1109/ASPAA.1991.634112 (verified).
+- Overview: Fielder, Bosi, Davidson, Davis, Todd & Vernon, "AC-2 and
+  AC-3: Low-Complexity Transform-Based Audio Coding," in *Collected
+  Papers on Digital Audio Bit-Rate Reduction*, AES, 1996 (no DOI —
+  AES publications of the era were not assigned them).
+
+Rate cross-check: 93.75 frames/s × 512 B = 48,000 B/s = 384 kbit/s for
+the .SVA stream = 192 kbit/s/channel at 48 kHz — inside AC-2's
+documented operating range. The wiki numbers cohere.
+
+What closes the bitstream gap, in rough order of decisiveness:
+
+1. The CA10 DSP firmware (`sva_*.ehx` in the dolby-srd repo):
+   disassembly recovers the actual tables and allocation algorithm.
+2. The expired Dolby patents (Fielder/Davidson family, filed
+   ~1989–91) — far more implementation detail than the papers.
+3. AC-3 as a Rosetta stone: the public ATSC A/52 spec and liba52/FFmpeg
+   descend directly from AC-2's exponent/allocation machinery.
+4. Known-plaintext: the wiki's example .SVA (1 kHz tone); reels
+   captured on Everett's rig give input/output pairs.
+
+Estimated effort: framing + filterbank are textbook (days);
+exponent/allocation core is careful RE (weeks, less with firmware
+disassembly). Comparable to FFmpeg's Dolby E effort. Fully separable:
+archival deliverables (images + extracted files) do not wait on it.
 
 ## Findings from real images
 

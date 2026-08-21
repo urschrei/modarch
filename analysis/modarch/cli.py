@@ -27,6 +27,11 @@ def main(argv: list[str] | None = None) -> int:
 
     sd = sub.add_parser("srd", help="scan for Dolby printmaster (.SRD/.SVA) frame runs")
     sd.add_argument("image")
+    sd.add_argument(
+        "--extract",
+        metavar="PREFIX",
+        help="write each run's audio payload to PREFIX_runNN.bin (raw AC-3/AC-2 stream)",
+    )
 
     args = p.parse_args(argv)
 
@@ -52,14 +57,20 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.cmd == "srd":
-        from modarch.srd import find_frame_runs
+        from modarch.srd import extract_payload, find_frame_runs
 
         runs = find_frame_runs(data)
         if not runs:
             print("no printmaster frame runs found")
             return 1
-        for r in runs:
+        for i, r in enumerate(runs):
             print(r.describe())
+            if args.extract:
+                out = f"{args.extract}_run{i:02d}.bin"
+                payload = extract_payload(data, r)
+                with open(out, "wb") as f:
+                    f.write(payload)
+                print(f"  -> {out} ({len(payload)} bytes)")
         return 0
 
     if args.cmd == "prospect":
