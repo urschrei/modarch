@@ -13,18 +13,19 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-i686
       - name: Build imager.exe
         run: make -C imager
+      - name: Verify msvcrt linkage (no UCRT)
+        run: make -C imager check-vista
+      - uses: actions/upload-artifact@v7          # ← moved BEFORE wine
+        with:
+          name: imager-vista-i686
+          path: imager/imager.exe
       - name: Smoke test under Wine (Vista mode)
-        # best-effort: verifies the PE loads and prints usage; real
-        # validation happens on the actual Vista machine
         continue-on-error: true
+        timeout-minutes: 8                        # ← frozen mirror can't eat the runner
         run: |
           sudo dpkg --add-architecture i386
           sudo apt-get update && sudo apt-get install -y wine32:i386
           WINEDEBUG=-all wine imager/imager.exe || test $? -eq 2
-      - uses: actions/upload-artifact@v4
-        with:
-          name: imager-vista-i686
-          path: imager/imager.exe
 
   analysis:
     runs-on: ubuntu-latest
