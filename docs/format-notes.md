@@ -158,6 +158,21 @@ archival deliverables (images + extracted files) do not wait on it.
 ## Open questions
 
 - Actual sector size and capacity; any vendor-specific SCSI behavior.
-- Single audio stream per disc or multiple reels/files?
-- Timecode/sync metadata — where does reel alignment live?
-- Any per-sector framing/ECC beyond the drive's own?
+- The MO filesystem layout itself — the one layer nobody has documented.
+  Expected contents per the wiki: per-reel `.SRD`/`.SVA`/`.CAT`/`.LOG`,
+  a `.MEP` project file, and the CA10 firmware set
+  (`*.ehx`, `dsp-boot.bin`, `dsp.ldc`, `dyn.ldr`, `PROTECT.DMU`) —
+  finding these names in a raw image is the fastest way to reverse the
+  directory structure.
+- Reel alignment/timecode: block ordinals and packed reel numbers exist
+  in-frame (bytes 7–9 and 478–480); is there anything at filesystem
+  level beyond that?
+- Any per-sector framing/ECC beyond the drive's own? (The CA10 adds the
+  film-side error correction itself, so the printmaster likely carries
+  little or none — per the wiki's CA10 card analysis.)
+- The frame checksum at bytes 476–477: algorithm unknown; recoverable
+  by brute-forcing common 16-bit checksums over a real frame corpus.
+
+Answered since first draft: audio is per-reel files, not one stream
+(wiki); Lt/Rt is AC-2-coded, not PCM (wiki); plaintext seen in hex
+dumps is consistent with the `.LOG` files (wiki).
