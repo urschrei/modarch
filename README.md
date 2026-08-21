@@ -12,7 +12,7 @@ Two workstreams, deliberately decoupled:
 | `analysis/` | any modern machine | Python 3.10+ | format archaeology on the resulting images |
 
 The Vista machine only ever runs the imager. Everything else iterates on
-images, so drive time on real discs is spent exactly once per disc.
+images, so drive time on discs is spent exactly once per disc.
 
 ## Ground rules for handling discs
 
@@ -25,6 +25,12 @@ images, so drive time on real discs is spent exactly once per disc.
    master.
 
 ## imager
+
+**Download:** a prebuilt `imager-vista-i686.exe` and its `.sha256` are
+attached to every
+[GitHub release](https://github.com/urschrei/modarch/releases/latest).
+No build tools or runtime are needed on the Vista machine: copy the
+executable across, verify the checksum, and run it.
 
 Single static executable, no dependencies, no network. Uses SPTI
 (`SCSI_PASS_THROUGH_DIRECT`, present since NT) so it works on Vista.
@@ -41,16 +47,84 @@ It queries the drive for the true sector size via READ CAPACITY: MO media
 is commonly 1024 bytes/sector, not 512, then reads with per-sector retry,
 zero-filling and logging anything unrecoverable.
 
-Build locally (Linux/macOS with mingw installed) with `make -C imager`, or
-let CI do it: every push builds `imager.exe` as a GitHub Actions artifact.
+To build it yourself instead (Linux/macOS with mingw installed), run
+`make -C imager`, or let CI do it: every push builds `imager.exe` as a
+GitHub Actions artifact, and every tag publishes it as a release asset.
 Toolchain notes: modern MSVC and Rust have dropped Vista, so this is
 C, cross-compiled with MinGW-w64 against **msvcrt** (not UCRT), `-static`,
 i686 so it runs on 32- and 64-bit Vista alike.
 
 ## analysis
 
+The analysis tools are a Python package, `modarch`, that installs a
+`modarch` command. It needs Python 3.10 or newer and has one dependency
+(`numpy`). Pick whichever of the following fits how you work.
+
+### Install without cloning the repository
+
+These fetch the package straight from GitHub. `git` must be on your
+`PATH`. The `#subdirectory=analysis` suffix is required because the
+package does not live at the repository root.
+
+If you use [uv](https://docs.astral.sh/uv/) (recommended: one command,
+no environment to manage):
+
 ```
-pip install -e analysis/
+uv tool install "git+https://github.com/urschrei/modarch.git#subdirectory=analysis"
+```
+
+If you use [pipx](https://pipx.pypa.io/):
+
+```
+pipx install "git+https://github.com/urschrei/modarch.git#subdirectory=analysis"
+```
+
+Both put `modarch` on your `PATH` in its own isolated environment and
+leave your system Python untouched. Upgrade later with
+`uv tool upgrade modarch` or `pipx upgrade modarch`.
+
+To run it once without installing anything permanent:
+
+```
+uvx --from "git+https://github.com/urschrei/modarch.git#subdirectory=analysis" modarch srd disc.img
+```
+
+If you only have plain `pip`, install into a virtual environment rather
+than your system Python:
+
+```
+python3 -m venv modarch-env
+source modarch-env/bin/activate        # Windows: modarch-env\Scripts\activate
+pip install "git+https://github.com/urschrei/modarch.git#subdirectory=analysis"
+```
+
+To pin a specific version, add `@<tag>` before the `#`, for example
+`...modarch.git@v0.3.0#subdirectory=analysis`. Without a pin you get the
+current `main`.
+
+### Install from a clone of this repository
+
+From the repository root:
+
+```
+uv tool install ./analysis              # isolated, on PATH; or:
+pipx install ./analysis
+
+pip install -e analysis/                # editable, into the active venv
+```
+
+For development, the package directory has its own `uv.lock`:
+
+```
+cd analysis
+uv sync --extra dev
+uv run modarch --help
+uv run pytest
+```
+
+### Usage
+
+```
 modarch synth  demo.img            # build a synthetic test image
 modarch map    demo.img            # entropy/structure map of an image
 modarch srd    disc.img            # find Dolby printmaster frame runs
@@ -58,7 +132,7 @@ modarch srd    disc.img --extract reel   # ...and extract raw AC-2/AC-3 streams
 modarch prospect demo.img -o out/  # sweep PCM interpretations, emit WAVs
 ```
 
-`srd` is the primary tool for real discs: it parses the documented
+`srd` is the primary tool for disc data: it parses the documented
 512-byte printmaster frame structure (sync word, container type,
 ordinals, reel/block numbers) and reassembles the raw elementary
 streams from the audio frames. `prospect` brute-forces the small space
