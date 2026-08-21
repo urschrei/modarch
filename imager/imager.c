@@ -29,6 +29,10 @@
 #define CAPACITY_TRIES 3       /* READ CAPACITY attempts                 */
 #define SENSE_LEN      32
 
+#ifndef IMAGER_VERSION
+#define IMAGER_VERSION "unversioned"
+#endif
+
 typedef struct {
     SCSI_PASS_THROUGH_DIRECT sptd;
     UCHAR sense[SENSE_LEN];
@@ -288,6 +292,9 @@ int main(int argc, char **argv)
     char vendor[9], product[17], rev[5];
     UCHAR inq[INQ_LEN], cap[8], ms[MS_LEN];
     int inq_len, ms_len, ms_ten = 0;
+    DWORD t0, t1;
+    SYSTEMTIME st;
+    OSVERSIONINFOA osv;
     uint32_t last_lba, block_size, nblocks, lba, chunk, chunk_bytes;
     uint16_t n;
     uint64_t bad = 0, written = 0, chunk_fail = 0, recovered = 0;
@@ -325,6 +332,20 @@ int main(int argc, char **argv)
     if (!g_log)
         fprintf(stderr, "warning: cannot create %s (%s), logging to "
                 "stderr only\n", path, strerror(errno));
+
+    logf_("imager %s (built %s %s)\n", IMAGER_VERSION, __DATE__, __TIME__);
+    logf_("command: %s %s\n", argv[1], argv[2]);
+    GetLocalTime(&st);
+    logf_("started: %04u-%02u-%02u %02u:%02u:%02u (machine clock)\n",
+          st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+    memset(&osv, 0, sizeof osv);
+    osv.dwOSVersionInfoSize = sizeof osv;
+    if (GetVersionExA(&osv))
+        logf_("windows: %lu.%lu build %lu %s\n",
+              (unsigned long)osv.dwMajorVersion,
+              (unsigned long)osv.dwMinorVersion,
+              (unsigned long)osv.dwBuildNumber, osv.szCSDVersion);
+    t0 = GetTickCount();
 
     {
         scsi_err e;
@@ -523,10 +544,14 @@ int main(int argc, char **argv)
                 logf_("warning: error writing %s (%s)\n", path, strerror(errno));
         }
     }
+    t1 = GetTickCount();
     logf_("done: %llu unreadable sector(s), %llu recovered on retry, "
           "%llu chunk read(s) fell back to sector-by-sector\n",
           (unsigned long long)bad, (unsigned long long)recovered,
           (unsigned long long)chunk_fail);
+    logf_("elapsed: %lu s, %.2f MB/s\n", (unsigned long)((t1 - t0) / 1000),
+          (t1 > t0) ? (double)written / 1e6 / ((double)(t1 - t0) / 1000.0)
+                    : 0.0);
     logf_("sha256: ");
     for (i = 0; i < 32; i++) logf_("%02x", digest[i]);
     logf_("\n");
