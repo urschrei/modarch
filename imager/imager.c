@@ -24,6 +24,8 @@
                                   reduced if the adapter allows less   */
 #define SPTI_TIMEOUT   30      /* seconds per SCSI command               */
 #define MAX_RETRIES    4       /* per-sector retries in the slow path    */
+#define READY_WAIT     30      /* seconds to wait for TEST UNIT READY    */
+#define CAPACITY_TRIES 3       /* READ CAPACITY attempts                 */
 #define SENSE_LEN      32
 
 typedef struct {
@@ -78,7 +80,8 @@ static int scsi_cmd(HANDLE h, const UCHAR *cdb, UCHAR cdblen,
     s.sptd.Length             = sizeof(SCSI_PASS_THROUGH_DIRECT);
     s.sptd.CdbLength          = cdblen;
     s.sptd.SenseInfoLength    = SENSE_LEN;
-    s.sptd.DataIn             = SCSI_IOCTL_DATA_IN;
+    s.sptd.DataIn             = buflen ? SCSI_IOCTL_DATA_IN
+                                       : SCSI_IOCTL_DATA_UNSPECIFIED;
     s.sptd.DataTransferLength = buflen;
     s.sptd.TimeOutValue       = SPTI_TIMEOUT;
     s.sptd.DataBuffer         = buf;
@@ -143,6 +146,32 @@ static int inquiry(HANDLE h, char vendor[9], char product[17], char rev[5],
     memcpy(product, buf + 16, 16); product[16] = 0;
     memcpy(rev,     buf + 32, 4);  rev[4]      = 0;
     return 0;
+}
+
+static int test_unit_ready(HANDLE h, scsi_err *e)
+{
+    UCHAR cdb[6] = { 0x00, 0, 0, 0, 0, 0 };    /* TEST UNIT READY */
+    return scsi_cmd(h, cdb, 6, NULL, 0, e);
+}
+
+/* Wait for the drive to report ready. A cartridge takes several seconds
+ * to spin up after insertion, and the first command after a medium
+ * change may return UNIT ATTENTION, which this poll absorbs. */
+static int wait_ready(HANDLE h)
+{
+    scsi_err e;
+    char es[96];
+    int t;
+    for (t = 0; t <= READY_WAIT; t++) {
+        if (test_unit_ready(h, &e) == 0) {
+            logf_("ready after %d s\n", t);
+            return 0;
+        }
+        err_str(&e, es);
+        logf_("not ready (%s), waiting (%d/%d s)\n", es, t, READY_WAIT);
+        Sleep(1000);
+    }
+    return -1;
 }
 
 static int read_capacity(HANDLE h, uint32_t *last_lba, uint32_t *block_size,
@@ -238,10 +267,20 @@ int main(int argc, char **argv)
             logf_("warning: INQUIRY failed (%s)\n", es);
         }
 
-        if (read_capacity(h, &last_lba, &block_size, &e) != 0) {
+        if (wait_ready(h) != 0)
+            logf_("warning: drive not ready after %d s, trying anyway\n",
+                  READY_WAIT);
+
+        for (i = 1; ; i++) {
+            if (read_capacity(h, &last_lba, &block_size, &e) == 0) break;
             err_str(&e, es);
-            logf_("READ CAPACITY failed (%s) — no medium, or unsupported\n", es);
-            return 1;
+            logf_("READ CAPACITY failed (%s), attempt %d/%d\n",
+                  es, i, CAPACITY_TRIES);
+            if (i == CAPACITY_TRIES) {
+                logf_("giving up — no medium, or unsupported\n");
+                return 1;
+            }
+            Sleep(1000);
         }
     }
     nblocks = last_lba + 1;
