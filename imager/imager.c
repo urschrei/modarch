@@ -14,6 +14,7 @@
 #include <winioctl.h>
 #include <ntddscsi.h>
 #include <stdio.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
@@ -283,11 +284,12 @@ int main(int argc, char **argv)
 {
     HANDLE h;
     FILE *img;
-    char path[512], img_path[512];
+    char path[512] = {0}, img_path[512] = {0};
     char vendor[9], product[17], rev[5];
     UCHAR inq[INQ_LEN], cap[8], ms[MS_LEN];
     int inq_len, ms_len, ms_ten = 0;
     uint32_t last_lba, block_size, nblocks, lba, chunk, chunk_bytes;
+    uint16_t n;
     uint64_t bad = 0, written = 0, chunk_fail = 0, recovered = 0;
     UCHAR *buf;
     sha256_ctx sha;
@@ -300,7 +302,15 @@ int main(int argc, char **argv)
             "  e.g. imager.exe \\\\.\\PhysicalDrive2 disc01\n");
         return 2;
     }
+    /* _snprintf does not terminate on truncation; keep room for the
+     * suffix and the NUL. */
+    if (strlen(argv[2]) > sizeof path - 16) {
+        fprintf(stderr, "output basename too long\n");
+        return 2;
+    }
 
+    /* IOCTL_SCSI_PASS_THROUGH_DIRECT requires a handle with both read
+     * and write access. No command issued here writes to the medium. */
     h = CreateFileA(argv[1], GENERIC_READ | GENERIC_WRITE,
                     FILE_SHARE_READ | FILE_SHARE_WRITE,
                     NULL, OPEN_EXISTING, 0, NULL);
@@ -312,6 +322,9 @@ int main(int argc, char **argv)
 
     _snprintf(path, sizeof path - 1, "%s.log", argv[2]);
     g_log = fopen(path, "w");
+    if (!g_log)
+        fprintf(stderr, "warning: cannot create %s (%s), logging to "
+                "stderr only\n", path, strerror(errno));
 
     {
         scsi_err e;
@@ -375,6 +388,15 @@ int main(int argc, char **argv)
             logf_("mode sense: unavailable (%s)\n", es);
         }
     }
+    if (last_lba == 0xffffffffUL) {
+        logf_("capacity exceeds READ CAPACITY(10) range — not supported\n");
+        return 1;
+    }
+    if (block_size == 0 || block_size > CHUNK_BYTES) {
+        logf_("implausible block size %lu — refusing\n",
+              (unsigned long)block_size);
+        return 1;
+    }
     nblocks = last_lba + 1;
     logf_("capacity: %lu blocks x %lu bytes = %llu bytes\n",
           (unsigned long)nblocks, (unsigned long)block_size,
@@ -425,8 +447,8 @@ int main(int argc, char **argv)
 
     sha256_init(&sha);
 
-    for (lba = 0; lba < nblocks; lba += chunk) {
-        uint16_t n = (uint16_t)((nblocks - lba < chunk) ? nblocks - lba : chunk);
+    for (lba = 0; lba < nblocks; lba += n) {
+        n = (uint16_t)((nblocks - lba < chunk) ? nblocks - lba : chunk);
         scsi_err e;
         char es[96];
 
