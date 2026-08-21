@@ -7,7 +7,9 @@
  *         imager.exe \\.\E: disc01
  *
  * Produces <base>.img, <base>.log, <base>.sha256.
- * Run elevated. Reads only: no WRITE opcodes exist in this program.
+ * Run elevated. Reads only: the commands issued are TEST UNIT READY,
+ * INQUIRY, READ CAPACITY(10), MODE SENSE(6/10) and READ(10); no WRITE
+ * opcodes exist in this program.
  */
 
 #include <windows.h>

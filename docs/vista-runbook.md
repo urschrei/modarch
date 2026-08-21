@@ -29,6 +29,10 @@ imager.exe
 It should print usage and exit. If Windows complains about a missing
 DLL instead, the wrong build travelled — stop here.
 
+Output goes next to the basename you give, so run from a directory on
+an **NTFS** volume with room for the full image. FAT32 (most USB
+sticks) stops at 4 GiB and the run fails.
+
 ### 2. Identify the MO drive
 
 ```
@@ -52,12 +56,31 @@ fc /b sac_a.img sac_b.img
 
 - `fc` must report no differences (equivalently, `sac_a.sha256` and
   `sac_b.sha256` must match).
-- Check `sac_a.log`: the INQUIRY line (vendor/product/revision) is
-  format documentation in itself — record it in
-  `docs/format-notes.md` later. Note the reported sector size:
-  1024 B/sector is expected for MO; anything else is worth noting.
-- Exit code 0 = clean; 3 = completed with unreadable sectors (listed
-  in the log, zero-filled in the image).
+- The imager waits up to 30 s for the drive to report ready after a
+  cartridge goes in, and logs each not-ready response. If it gives up,
+  the log says why.
+- Read `sac_a.log` in full before the print master goes in:
+  - The `device:` and `inquiry:` lines (vendor/product/revision, device
+    type, removable bit) and the raw INQUIRY, READ CAPACITY and MODE
+    SENSE dumps are format documentation in themselves — copy them into
+    `docs/format-notes.md` later.
+  - `mode sense(...)`: `write-protect YES` is expected. A `WARNING:
+    medium is not reported write-protected` line means either the tab
+    is not set or the drive does not report it; find out which before
+    continuing.
+  - `capacity:` — 1024 B/sector is expected for MO; anything else is
+    worth noting.
+  - `adapter:` and `chunk:` — the transfer limits the host reported and
+    the chunk size chosen. If every chunk read "fell back to
+    sector-by-sector" with a `win32=` cause, the host is rejecting the
+    transfer size rather than the disc being bad.
+  - `chunk ... failed`, `RECOVERED sector`, `BAD sector` lines — the
+    error geography. A sacrificial disc should produce none.
+  - `done:`, `elapsed:` — the summary counts and throughput, a baseline
+    for judging later runs.
+- Exit code 0 = clean; 1 = setup or write failure (see the log); 3 =
+  completed with unreadable sectors (listed in the log, zero-filled in
+  the image).
 
 If the double-image hashes disagree, stop: that is a drive, cable, or
 media problem, and no print master goes in the drive until it is
@@ -94,8 +117,12 @@ of *(unverified)* as they are confirmed.
 ## Reminders
 
 - The disc is the artifact. The image is the work product. Nothing
-  writes to the disc: the tool issues only INQUIRY, READ CAPACITY and
-  READ(10), and the cartridge tab is belt-and-braces on top.
+  writes to the disc: the tool issues only TEST UNIT READY, INQUIRY,
+  READ CAPACITY, MODE SENSE and READ(10), and the cartridge tab is
+  belt-and-braces on top.
+- Bring the `.log` files home even from failed runs. The log is the
+  only evidence of what the drive and host did, and it is what
+  shortens the next build-test cycle.
 - Unreadable sectors are zero-filled, never skipped, so file offsets in
   the image stay true to the disc.
 - If the drive spins down mid-read or a disc reads with errors, note
